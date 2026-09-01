@@ -5538,187 +5538,169 @@ namespace
         if (!logged)
         {
             logged = true;
-
-            Logger::GetSingleton().Print(
-                "Effect Debugger: PRESENT HOOK RUNNING"
-            );
+            Logger::GetSingleton().Print("Effect Debugger: PRESENT HOOK RUNNING");
         }
 
+        if (!swapChain)
+        {
+            return g_originalPresent(swapChain, syncInterval, flags);
+        }
 
+        // Inicializar se ainda não foi feito
         if (!g_imguiInitialized)
         {
             InitializeImGui(swapChain);
         }
 
-        if (g_imguiInitialized)
+        // Garante que o contexto, dispositivo e render target são 100% válidos antes de tocar no ImGui
+        if (g_imguiInitialized && g_device && g_context && g_renderTarget)
         {
-            CheckGKey();
-
+            // 1. Inicia o Frame do ImGui com segurança
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
 
+            // 2. Trata Inputs de Mouse se a janela estiver visível
             if (g_showTestWindow)
             {
-                POINT point;
-
+                POINT point{};
                 if (GetCursorPos(&point))
                 {
-                    ScreenToClient(g_gameWindow, &point);
-
-                    ImGui::GetIO().AddMousePosEvent(
-                        static_cast<float>(point.x),
-                        static_cast<float>(point.y)
-                    );
+                    if (g_gameWindow)
+                    {
+                        ScreenToClient(g_gameWindow, &point);
+                        ImGui::GetIO().AddMousePosEvent(
+                            static_cast<float>(point.x),
+                            static_cast<float>(point.y)
+                        );
+                    }
                 }
             }
 
-            ImGui::NewFrame();
-
-            
             ImGui::GetIO().MouseDrawCursor = g_showTestWindow;
 
-                // 1. CALCULA O ALPHA DE ACORDO COM O TEMPO DE QUADRO (DeltaTime)
-                float deltaTime = ImGui::GetIO().DeltaTime;
+            const float deltaTime = ImGui::GetIO().DeltaTime;
 
-                if (g_showTestWindow)
-                {
-                    // Fade-In: Aumenta até 1.0f
-                    globalAlpha += deltaTime * fadeSpeed;
-                    if (globalAlpha > 1.0f) globalAlpha = 1.0f;
-                }
-                else
-                {
-                    // Fade-Out: Diminui até 0.0f
-                    globalAlpha -= deltaTime * fadeSpeed;
-                    if (globalAlpha < 0.0f) globalAlpha = 0.0f;
-                }
+            // Fading do Menu
+            if (g_showTestWindow)
+            {
+                globalAlpha += deltaTime * fadeSpeed;
+                if (globalAlpha > 1.0f) globalAlpha = 1.0f;
+            }
+            else
+            {
+                globalAlpha -= deltaTime * fadeSpeed;
+                if (globalAlpha < 0.0f) globalAlpha = 0.0f;
+            }
 
-                // 2. APLICA O ALPHA EM TODO O IMGUI
+            // Renderiza o menu apenas se o Alpha for maior que zero para economizar draw calls
+            if (globalAlpha > 0.0f)
+            {
                 ImGui::PushStyleVar(ImGuiStyleVar_Alpha, globalAlpha);
+                EffectDatabase::DrawMenu();
+                ImGui::PopStyleVar();
+            }
 
-
-
-            EffectDatabase::DrawMenu();
-
-            ImGui::PopStyleVar();
-
+            // 3. Conclui o cálculo de vértices do ImGui
             ImGui::Render();
 
-            g_context->OMSetRenderTargets(
-                1,
-                &g_renderTarget,
-                nullptr
-            );
+            // 4. Salva o RenderTarget anterior do Skyrim para NÃO corromper os outros mods (OAR/IED)
+            ID3D11RenderTargetView* oldRenderTargetViews[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = { nullptr };
+            ID3D11DepthStencilView* oldDepthStencilView = nullptr;
+            g_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, oldRenderTargetViews, &oldDepthStencilView);
 
-            ImGui_ImplDX11_RenderDrawData(
-                ImGui::GetDrawData()
-            );
+            // Define o nosso RenderTarget do ImGui
+            g_context->OMSetRenderTargets(1, &g_renderTarget, nullptr);
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
+            // RESTAURA o RenderTarget do jogo/outros mods
+            g_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, oldRenderTargetViews, oldDepthStencilView);
+
+            // Libera os ponteiros de com obtidos pelo OMGetRenderTargets
+            for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
+            {
+                if (oldRenderTargetViews[i]) oldRenderTargetViews[i]->Release();
+            }
+            if (oldDepthStencilView) oldDepthStencilView->Release();
+
+            // 5. Screenshot Logic
             if (g_takeScreenshot)
             {
                 g_takeScreenshot = false;
-
                 ID3D11Texture2D* backBuffer = nullptr;
 
-                const HRESULT hr =
-                    swapChain->GetBuffer(
-                        0,
-                        IID_PPV_ARGS(&backBuffer));
+                const HRESULT hr = swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
 
                 if (SUCCEEDED(hr) && backBuffer)
                 {
                     const auto path = MakeScreenshotPath();
-
                     if (!path.empty())
                     {
-                        const bool saved =
-                            SaveTextureToPNG(
-                                g_device,
-                                g_context,
-                                backBuffer,
-                                path);
-
+                        const bool saved = SaveTextureToPNG(g_device, g_context, backBuffer, path);
                         if (saved)
                         {
                             SYSTEMTIME time{};
                             GetLocalTime(&time);
-
                             char dateTime[64]{};
+                            sprintf_s(dateTime, "%02d/%02d/%04d %02d:%02d:%02d",
+                                time.wDay, time.wMonth, time.wYear,
+                                time.wHour, time.wMinute, time.wSecond);
 
-                            sprintf_s(
-                                dateTime,
-                                "%02d/%02d/%04d %02d:%02d:%02d",
-                                time.wDay,
-                                time.wMonth,
-                                time.wYear,
-                                time.wHour,
-                                time.wMinute,
-                                time.wSecond);
-
-                            g_screenshotNotification =
-                                std::string("Saved!\n") +
-                                "Date: " +
-                                dateTime +
-                                "\nLocal: " +
-                                path.string();
-
+                            g_screenshotNotification = std::string("Saved!\nDate: ") + dateTime + "\nLocal: " + path.string();
                             g_screenshotNotificationTime = 5.0f;
                         }
                         else
                         {
-                            g_screenshotNotification =
-                                "Error";
-
+                            g_screenshotNotification = "Error";
                             g_screenshotNotificationTime = 3.0f;
                         }
                     }
                     else
                     {
-                        g_screenshotNotification =
-                            "Error: no folder.";
-
+                        g_screenshotNotification = "Error: no folder.";
                         g_screenshotNotificationTime = 3.0f;
                     }
-
                     backBuffer->Release();
                 }
                 else
                 {
-                    g_screenshotNotification =
-                        "Error in backbuffer.";
-
+                    g_screenshotNotification = "Error in backbuffer.";
                     g_screenshotNotificationTime = 3.0f;
                 }
             }
         }
 
-        return g_originalPresent(
-            swapChain,
-            syncInterval,
-            flags
-        );
+        return g_originalPresent(swapChain, syncInterval, flags);
     }
 
 
     // ============================================================
-    // MINHOOK + PRESENT
+    // NOVO PRESENT HOOK
     // ============================================================
 
     bool InitializePresentHook()
     {
         Logger::GetSingleton().Print(
-            "Effect Debugger: Creating temporary DX11 device..."
+            "Effect Debugger: Initializing DX11 Present hook..."
         );
 
         WNDCLASSEXA wc{};
-
         wc.cbSize = sizeof(WNDCLASSEXA);
         wc.lpfnWndProc = DefWindowProcA;
         wc.hInstance = GetModuleHandleA(nullptr);
-        wc.lpszClassName =
-            "EffectDebuggerDummy";
+        wc.lpszClassName = "EffectDebuggerDummy";
 
-        RegisterClassExA(&wc);
+        const ATOM atom = RegisterClassExA(&wc);
+
+        if (!atom && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        {
+            Logger::GetSingleton().Print(
+                "Effect Debugger: RegisterClassExA FAILED: {}",
+                static_cast<unsigned>(GetLastError())
+            );
+
+            return false;
+        }
 
         HWND hwnd = CreateWindowExA(
             0,
@@ -5738,33 +5720,23 @@ namespace
         if (!hwnd)
         {
             Logger::GetSingleton().Print(
-                "Effect Debugger: CreateWindow FAILED"
+                "Effect Debugger: CreateWindow FAILED: {}",
+                static_cast<unsigned>(GetLastError())
             );
 
             return false;
         }
 
         DXGI_SWAP_CHAIN_DESC swapDesc{};
-
         swapDesc.BufferCount = 1;
-
         swapDesc.BufferDesc.Width = 100;
         swapDesc.BufferDesc.Height = 100;
-
-        swapDesc.BufferDesc.Format =
-            DXGI_FORMAT_R8G8B8A8_UNORM;
-
-        swapDesc.BufferUsage =
-            DXGI_USAGE_RENDER_TARGET_OUTPUT;
-
+        swapDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         swapDesc.OutputWindow = hwnd;
-
         swapDesc.SampleDesc.Count = 1;
-
         swapDesc.Windowed = TRUE;
-
-        swapDesc.SwapEffect =
-            DXGI_SWAP_EFFECT_DISCARD;
+        swapDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
         ID3D11Device* device = nullptr;
         ID3D11DeviceContext* context = nullptr;
@@ -5772,21 +5744,24 @@ namespace
 
         D3D_FEATURE_LEVEL featureLevel{};
 
-        HRESULT hr =
-            D3D11CreateDeviceAndSwapChain(
-                nullptr,
-                D3D_DRIVER_TYPE_HARDWARE,
-                nullptr,
-                0,
-                nullptr,
-                0,
-                D3D11_SDK_VERSION,
-                &swapDesc,
-                &swapChain,
-                &device,
-                &featureLevel,
-                &context
-            );
+        Logger::GetSingleton().Print(
+            "Effect Debugger: Creating temporary DX11 device..."
+        );
+
+        const HRESULT hr = D3D11CreateDeviceAndSwapChain(
+            nullptr,
+            D3D_DRIVER_TYPE_HARDWARE,
+            nullptr,
+            0,
+            nullptr,
+            0,
+            D3D11_SDK_VERSION,
+            &swapDesc,
+            &swapChain,
+            &device,
+            &featureLevel,
+            &context
+        );
 
         if (FAILED(hr))
         {
@@ -5795,33 +5770,138 @@ namespace
                 static_cast<unsigned>(hr)
             );
 
+            if (context)
+                context->Release();
+
+            if (device)
+                device->Release();
+
+            if (swapChain)
+                swapChain->Release();
+
             DestroyWindow(hwnd);
 
-            UnregisterClassA(
-                wc.lpszClassName,
-                wc.hInstance
-            );
+            if (atom)
+            {
+                UnregisterClassA(
+                    wc.lpszClassName,
+                    wc.hInstance
+                );
+            }
 
             return false;
         }
 
+        if (!swapChain)
+        {
+            Logger::GetSingleton().Print(
+                "Effect Debugger: swapChain is NULL"
+            );
+
+            if (context)
+                context->Release();
+
+            if (device)
+                device->Release();
+
+            DestroyWindow(hwnd);
+
+            if (atom)
+            {
+                UnregisterClassA(
+                    wc.lpszClassName,
+                    wc.hInstance
+                );
+            }
+
+            return false;
+        }
+
+        //
+        // IDXGISwapChain::Present = vtable[8]
+        //
         void** vtable =
             *reinterpret_cast<void***>(swapChain);
 
-        void* presentAddress =
-            vtable[8];
+        if (!vtable)
+        {
+            Logger::GetSingleton().Print(
+                "Effect Debugger: SwapChain vtable is NULL"
+            );
+
+            if (context)
+                context->Release();
+
+            if (device)
+                device->Release();
+
+            swapChain->Release();
+
+            DestroyWindow(hwnd);
+
+            if (atom)
+            {
+                UnregisterClassA(
+                    wc.lpszClassName,
+                    wc.hInstance
+                );
+            }
+
+            return false;
+        }
+
+        void* presentAddress = vtable[8];
 
         Logger::GetSingleton().Print(
             "Effect Debugger: Present address = {}",
             presentAddress
         );
 
-        MH_STATUS status =
-            MH_CreateHook(
-                presentAddress,
-                reinterpret_cast<void*>(&PresentHook),
-                reinterpret_cast<void**>(&g_originalPresent)
+        if (!presentAddress)
+        {
+            Logger::GetSingleton().Print(
+                "Effect Debugger: Present address is NULL"
             );
+
+            if (context)
+                context->Release();
+
+            if (device)
+                device->Release();
+
+            swapChain->Release();
+
+            DestroyWindow(hwnd);
+
+            if (atom)
+            {
+                UnregisterClassA(
+                    wc.lpszClassName,
+                    wc.hInstance
+                );
+            }
+
+            return false;
+        }
+
+        //
+        // IMPORTANT:
+        // Não tenta criar o hook novamente.
+        //
+        Logger::GetSingleton().Print(
+            "Effect Debugger: BEFORE MH_CreateHook"
+        );
+
+        MH_STATUS status = MH_CreateHook(
+            presentAddress,
+            reinterpret_cast<void*>(&PresentHook),
+            reinterpret_cast<void**>(&g_originalPresent)
+        );
+
+        Logger::GetSingleton().Print(
+            "Effect Debugger: AFTER MH_CreateHook = {}",
+            static_cast<int>(status)
+        );
 
         if (status != MH_OK)
         {
@@ -5830,42 +5910,84 @@ namespace
                 static_cast<int>(status)
             );
 
-            context->Release();
-            device->Release();
+            if (context)
+                context->Release();
+
+            if (device)
+                device->Release();
+
             swapChain->Release();
 
             DestroyWindow(hwnd);
 
-            UnregisterClassA(
-                wc.lpszClassName,
-                wc.hInstance
-            );
+            if (atom)
+            {
+                UnregisterClassA(
+                    wc.lpszClassName,
+                    wc.hInstance
+                );
+            }
 
             return false;
         }
 
-        status =
-            MH_EnableHook(presentAddress);
-
         Logger::GetSingleton().Print(
-            "Effect Debugger: MH_EnableHook = {}",
-            static_cast<int>(status)
+            "Effect Debugger: BEFORE MH_EnableHook"
         );
 
-        context->Release();
-        device->Release();
-        swapChain->Release();
+        status = MH_EnableHook(presentAddress);
 
-        DestroyWindow(hwnd);
-
-        UnregisterClassA(
-            wc.lpszClassName,
-            wc.hInstance
+        Logger::GetSingleton().Print(
+            "Effect Debugger: AFTER MH_EnableHook = {}",
+            static_cast<int>(status)
         );
 
         if (status != MH_OK)
         {
+            Logger::GetSingleton().Print(
+                "Effect Debugger: MH_EnableHook FAILED: {}",
+                static_cast<int>(status)
+            );
+
+            MH_RemoveHook(presentAddress);
+
+            if (context)
+                context->Release();
+
+            if (device)
+                device->Release();
+
+            swapChain->Release();
+
+            DestroyWindow(hwnd);
+
+            if (atom)
+            {
+                UnregisterClassA(
+                    wc.lpszClassName,
+                    wc.hInstance
+                );
+            }
+
             return false;
+        }
+
+        if (context)
+            context->Release();
+
+        if (device)
+            device->Release();
+
+        swapChain->Release();
+
+        DestroyWindow(hwnd);
+
+        if (atom)
+        {
+            UnregisterClassA(
+                wc.lpszClassName,
+                wc.hInstance
+            );
         }
 
         Logger::GetSingleton().Print(
@@ -5999,7 +6121,8 @@ SKSEPluginLoad(
                             "Effect Debugger: MinHook initialization FAILED"
                         );
 
-                        return;
+                        hooksInitialized = true;
+                        break;
                     }
 
                     if (!InitializePresentHook())
@@ -6008,7 +6131,10 @@ SKSEPluginLoad(
                             "Effect Debugger: Present hook initialization FAILED"
                         );
 
-                        return;
+                        // Não deixa uma falha do Present Hook derrubar o Skyrim.
+                        hooksInitialized = true;
+
+                        break;
                     }
 
                     hooksInitialized = true;
