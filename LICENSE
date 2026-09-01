@@ -1,0 +1,35 @@
+Copyright (c) 2026 Preguissoso
+
+SOURCE-AVAILABLE / ALL RIGHTS RESERVED
+
+Permission is granted to view and inspect the source code of this
+project for personal, educational, and reference purposes.
+
+You may not, without prior written permission from the copyright holder:
+
+- modify the source code;
+- create derivative works;
+- create or distribute forks;
+- redistribute the source code;
+- redistribute modified versions;
+- incorporate the source code into another project;
+- publish modified versions of the project.
+
+Only the original copyright holder may modify and distribute the
+official source code and official versions of this project.
+
+This license applies only to source code authored by the copyright
+holder and does not apply to third-party libraries or other components
+distributed with this project. Such components remain subject to their
+respective licenses.
+
+
+
+COMMONLIBSSE NG - alandtse fork
+→ GPL-3.0-or-later + Modding Exception + Linking Exception
+
+MINHOOK
+→ The MIT License (MIT)
+
+IMGUI
+→ All rights reserved.
