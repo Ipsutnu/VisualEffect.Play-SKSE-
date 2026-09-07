@@ -1,20 +1,12 @@
-/*
- * Copyright (c) 2026 Preguissoso
- *
- * This file is part of VisualEffect.Play(SKSE).
- *
- * The source code is available for viewing and reference purposes only.
- * Modification, redistribution, forking, and creation of derivative
- * works are not permitted without prior written permission.
- *
- * See LICENSE for the full license terms.
- */
-
 #include "pch.h"
 #include "EffectDatabase.h"
 #include "Logger.h"
 
+#include <shlobj.h>
+#include <filesystem>
 
+#include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/msvc_sink.h>
 
 bool ParseBool(const std::string& value)
 {
@@ -27,13 +19,24 @@ bool ParseBool(const std::string& value)
         value == "YES";
 }
 
+std::filesystem::path GetConfigPath()
+{
+    // Obtém a pasta 'Data/SKSE/Plugins' diretamente via CommonLibSSE
+    // Caso a pasta não exista no disco, o filesystem cria a estrutura.
+    auto path = SKSE::log::log_directory(); 
+    if (path) {
+        // SKSE::log::log_directory() geralmente aponta para "My Games/Skyrim Special Edition/SKSE"
+        // Para salvar diretamente na pasta do jogo Data/SKSE/Plugins:
+        return std::filesystem::current_path() / "Data" / "SKSE" / "Plugins" / "VisualEffectPlay.ini";
+    }
+
+    // Fallback relativo seguro
+    return std::filesystem::path("Data") / "SKSE" / "Plugins" / "VisualEffectPlay.ini";
+}
+
 void LoadConfig()
 {
-    const auto path =
-        std::filesystem::path("Data") /
-        "SKSE" /
-        "Plugins" /
-        "EffectListener.ini";
+    const auto path = GetConfigPath();
 
     std::ifstream file(path);
 
@@ -200,6 +203,22 @@ void LoadConfig()
                 EffectControl::g_disablePlayerMovement = !state;
                     
             }
+            else if (key == "FontScale")
+            {
+                try {
+                    float scale = std::stof(value);
+                    
+                    // Garante que o valor lido esteja em um limite seguro (ex: entre 0.5 e 2.5)
+                    if (scale >= 0.5f && scale <= 2.5f) {
+                        ImGui::GetIO().FontGlobalScale = scale;
+                    }
+                }
+                catch (...) {
+                    Logger::GetSingleton().Print("Erro ao ler FontScale do INI. Usando padrao (1.0).");
+                    ImGui::GetIO().FontGlobalScale = 1.0f;
+                }
+            }
+            
         }
         else if (section == "Favorites")
         {
@@ -224,7 +243,7 @@ void LoadConfig()
                         // Converte o tipo para int e faz cast pro seu enum
                         int parsedType = std::stoi(typeStr);
 
-                        // Recria o objeto e adiciona na lista (ajuste a ordem dos atributos conforme sua struct)
+                        // Recria o objeto e adiciona na lista
                         EffectDatabase::favorites.push_back({
                             parsedID,
                             static_cast<EffectType>(parsedType), // Ajuste pro seu Enum
@@ -245,18 +264,14 @@ void LoadConfig()
 
 void SaveConfig()
 {
-    const auto path =
-        std::filesystem::path("Data") /
-        "SKSE" /
-        "Plugins" /
-        "EffectListener.ini";
+    const auto path = GetConfigPath();
 
     std::ofstream file(path);
 
     if (!file.is_open())
     {
         Logger::GetSingleton().Print(
-            "Failed to save EffectListener.ini"
+            "Failed to save VisualEffectPlay.ini"
         );
 
         return;
@@ -314,6 +329,8 @@ void SaveConfig()
              ? "true"
              : "false")
          << "\n";
+
+    file << "FontScale=" << ImGui::GetIO().FontGlobalScale << "\n";
 
     // ============================================================
     // FAVORITES
@@ -561,15 +578,14 @@ int ParseKey(const std::string& key)
     return VK_F3;
 }
 
-
-
 std::filesystem::path GetPicturesFolder()
 {
     PWSTR path = nullptr;
 
+    // KF_FLAG_CREATE garante que o Windows crie o diretório 'Pictures' se ele não existir
     HRESULT hr = SHGetKnownFolderPath(
         FOLDERID_Pictures,
-        KF_FLAG_DEFAULT,
+        KF_FLAG_CREATE,
         nullptr,
         &path);
 
@@ -594,11 +610,9 @@ std::filesystem::path MakeScreenshotPath()
         return {};
     }
 
-    std::filesystem::path folder =
-        pictures / "Skyrim Screenshots";
+    std::filesystem::path folder = pictures / "Skyrim Screenshots";
 
     std::error_code ec;
-
     std::filesystem::create_directories(folder, ec);
 
     if (ec)
@@ -606,21 +620,22 @@ std::filesystem::path MakeScreenshotPath()
         return {};
     }
 
-    const auto now =
-        std::chrono::system_clock::now();
+    // Tempo atual com precisão de milissegundos
+    const auto now = std::chrono::system_clock::now();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()
+    ) % 1000;
 
-    const std::time_t time =
-        std::chrono::system_clock::to_time_t(now);
+    const std::time_t time = std::chrono::system_clock::to_time_t(now);
 
     std::tm localTime{};
-
     localtime_s(&localTime, &time);
 
     std::ostringstream filename;
-
     filename
         << "Skyrim_"
         << std::put_time(&localTime, "%Y-%m-%d_%H-%M-%S")
+        << "_" << std::setfill('0') << std::setw(3) << ms.count() // Adiciona milissegundos
         << ".png";
 
     return folder / filename.str();
@@ -633,28 +648,24 @@ bool SaveTextureToPNG(
     const std::filesystem::path& path)
 {
     if (!device || !context || !source)
-    {
         return false;
-    }
 
     D3D11_TEXTURE2D_DESC desc{};
-
     source->GetDesc(&desc);
 
+    Logger::GetSingleton().Print(
+        "Screenshot: SaveTexture format={}",
+        static_cast<int>(desc.Format));
+
     // ============================================================
-    // Cria uma textura staging que pode ser lida pela CPU.
+    // STAGING
     // ============================================================
 
     D3D11_TEXTURE2D_DESC stagingDesc = desc;
 
-    stagingDesc.Usage =
-        D3D11_USAGE_STAGING;
-
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
     stagingDesc.BindFlags = 0;
-
-    stagingDesc.CPUAccessFlags =
-        D3D11_CPU_ACCESS_READ;
-
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     stagingDesc.MiscFlags = 0;
 
     ID3D11Texture2D* staging = nullptr;
@@ -666,20 +677,18 @@ bool SaveTextureToPNG(
 
     if (FAILED(hr) || !staging)
     {
+        Logger::GetSingleton().Print(
+            "Screenshot: CreateTexture2D staging FAILED hr=0x{:08X}",
+            static_cast<unsigned>(hr));
+
         return false;
     }
 
     // ============================================================
-    // Copia GPU -> staging
+    // GPU -> CPU
     // ============================================================
 
-    context->CopyResource(
-        staging,
-        source);
-
-    // ============================================================
-    // Mapeia a textura para CPU.
-    // ============================================================
+    context->CopyResource(staging, source);
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
 
@@ -692,8 +701,137 @@ bool SaveTextureToPNG(
 
     if (FAILED(hr))
     {
+        Logger::GetSingleton().Print(
+            "Screenshot: Map FAILED hr=0x{:08X}",
+            static_cast<unsigned>(hr));
+
         staging->Release();
         return false;
+    }
+
+    Logger::GetSingleton().Print(
+        "Screenshot: RowPitch={}",
+        mapped.RowPitch);
+
+    // ============================================================
+    // CONVERTE PARA BGRA8
+    // ============================================================
+
+    const UINT width = desc.Width;
+    const UINT height = desc.Height;
+
+    const UINT rowBytes = width * 4;
+
+    std::vector<BYTE> pixels(
+        static_cast<size_t>(rowBytes) * height);
+
+    const BYTE* src =
+        static_cast<const BYTE*>(mapped.pData);
+
+    for (UINT y = 0; y < height; ++y)
+    {
+        const BYTE* srcRow =
+            src + static_cast<size_t>(y) * mapped.RowPitch;
+
+        BYTE* dstRow =
+            pixels.data() + static_cast<size_t>(y) * rowBytes;
+
+        for (UINT x = 0; x < width; ++x)
+        {
+            BYTE r = 0;
+            BYTE g = 0;
+            BYTE b = 0;
+            BYTE a = 255;
+
+            // ====================================================
+            // R10G10B10A2
+            // ====================================================
+
+            if (desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
+            {
+                const uint32_t packed =
+                    reinterpret_cast<const uint32_t*>(srcRow)[x];
+
+                const uint32_t r10 =
+                    packed & 0x3FF;
+
+                const uint32_t g10 =
+                    (packed >> 10) & 0x3FF;
+
+                const uint32_t b10 =
+                    (packed >> 20) & 0x3FF;
+
+                const uint32_t a2 =
+                    (packed >> 30) & 0x3;
+
+                r = static_cast<BYTE>(
+                    (r10 * 255 + 511) / 1023);
+
+                g = static_cast<BYTE>(
+                    (g10 * 255 + 511) / 1023);
+
+                b = static_cast<BYTE>(
+                    (b10 * 255 + 511) / 1023);
+
+                a = static_cast<BYTE>(
+                    (a2 * 255 + 1) / 3);
+            }
+
+            // ====================================================
+            // R8G8B8A8
+            // ====================================================
+
+            else if (
+                desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
+                desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
+            {
+                const BYTE* p =
+                    srcRow + x * 4;
+
+                r = p[0];
+                g = p[1];
+                b = p[2];
+                a = p[3];
+            }
+
+            // ====================================================
+            // B8G8R8A8
+            // ====================================================
+
+            else if (
+                desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+            {
+                const BYTE* p =
+                    srcRow + x * 4;
+
+                b = p[0];
+                g = p[1];
+                r = p[2];
+                a = p[3];
+            }
+
+            else
+            {
+                context->Unmap(staging, 0);
+                staging->Release();
+
+                Logger::GetSingleton().Print(
+                    "Screenshot: UNSUPPORTED DXGI format {}",
+                    static_cast<int>(desc.Format));
+
+                return false;
+            }
+
+            // WIC = BGRA
+            const size_t offset =
+                static_cast<size_t>(x) * 4;
+
+            dstRow[offset + 0] = b;
+            dstRow[offset + 1] = g;
+            dstRow[offset + 2] = r;
+            dstRow[offset + 3] = a;
+        }
     }
 
     // ============================================================
@@ -710,6 +848,9 @@ bool SaveTextureToPNG(
 
     if (FAILED(hr) || !factory)
     {
+        Logger::GetSingleton().Print(
+            "Screenshot: WIC factory FAILED.");
+
         context->Unmap(staging, 0);
         staging->Release();
 
@@ -748,7 +889,7 @@ bool SaveTextureToPNG(
         return false;
     }
 
-    std::wstring widePath =
+    const std::wstring widePath =
         path.wstring();
 
     hr = stream->InitializeFromFilename(
@@ -801,75 +942,40 @@ bool SaveTextureToPNG(
         return false;
     }
 
-    frame->Initialize(nullptr);
+    hr = frame->Initialize(nullptr);
 
-    frame->SetSize(
-        desc.Width,
-        desc.Height);
+    if (SUCCEEDED(hr))
+    {
+        hr = frame->SetSize(
+            width,
+            height);
+    }
 
     WICPixelFormatGUID format =
         GUID_WICPixelFormat32bppBGRA;
 
-    hr = frame->SetPixelFormat(&format);
+    if (SUCCEEDED(hr))
+    {
+        hr = frame->SetPixelFormat(&format);
+    }
 
     if (SUCCEEDED(hr))
     {
-        const UINT rowBytes =
-            desc.Width * 4;
-
-        std::vector<BYTE> pixels(
-            static_cast<size_t>(rowBytes) *
-            desc.Height);
-
-        const BYTE* src =
-            static_cast<const BYTE*>(mapped.pData);
-
-        BYTE* dst =
-            pixels.data();
-
-        for (UINT y = 0; y < desc.Height; ++y)
-        {
-            const BYTE* srcRow =
-                src +
-                static_cast<size_t>(y) *
-                mapped.RowPitch;
-
-            BYTE* dstRow =
-                dst +
-                static_cast<size_t>(y) *
-                rowBytes;
-
-            for (UINT x = 0; x < desc.Width; ++x)
-            {
-                const size_t offset =
-                    static_cast<size_t>(x) * 4;
-
-                dstRow[offset + 0] = srcRow[offset + 2];
-                dstRow[offset + 1] = srcRow[offset + 1];
-                dstRow[offset + 2] = srcRow[offset + 0];
-                dstRow[offset + 3] = srcRow[offset + 3];
-            }
-        }
-
         hr = frame->WritePixels(
-            desc.Height,
+            height,
             rowBytes,
             static_cast<UINT>(pixels.size()),
             pixels.data());
     }
 
     if (SUCCEEDED(hr))
-    {
         hr = frame->Commit();
-    }
 
     if (SUCCEEDED(hr))
-    {
         hr = encoder->Commit();
-    }
 
     // ============================================================
-    // Cleanup
+    // CLEANUP
     // ============================================================
 
     frame->Release();
@@ -877,77 +983,67 @@ bool SaveTextureToPNG(
     encoder->Release();
     factory->Release();
 
-    context->Unmap(
-        staging,
-        0);
-
+    context->Unmap(staging, 0);
     staging->Release();
+
+    Logger::GetSingleton().Print(
+        "Screenshot: WIC result hr=0x{:08X}",
+        static_cast<unsigned>(hr));
 
     return SUCCEEDED(hr);
 }
 
-Logger& Logger::GetSingleton()
+static std::filesystem::path GetLogDirectory()
 {
-    static Logger instance;
-    return instance;
+    wchar_t* buffer = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &buffer))) {
+        std::filesystem::path path(buffer);
+        CoTaskMemFree(buffer);
+
+        path /= "My Games";
+        path /= "Skyrim Special Edition";
+        path /= "SKSE";
+        return path;
+    }
+    return {};
 }
 
 void Logger::Initialize()
 {
-    std::lock_guard<std::mutex> lock(_mutex);
-
-    if (_initialized) {
+    auto directory = GetLogDirectory();
+    if (directory.empty()) {
         return;
     }
 
-    char* userProfile = nullptr;
-    size_t len = 0;
-
-    if (_dupenv_s(
-            &userProfile,
-            &len,
-            "USERPROFILE") != 0 ||
-        !userProfile)
-    {
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec) {
         return;
     }
 
-    std::filesystem::path directory =
-        std::filesystem::path(userProfile) /
-        "Documents" /
-        "My Games" /
-        "Skyrim Special Edition" /
-        "SKSE";
+    auto logPath = directory / "VisualEffectPlay.log";
 
-    std::filesystem::create_directories(directory);
+    // Reescreve o log a cada nova inicialização do jogo
+    auto fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logPath.string(), true);
+    auto msvcSink = std::make_shared<spdlog::sinks::msvc_sink_mt>();
 
-    std::filesystem::path path =
-        directory /
-        "EffectDebugger.log";
-
-    free(userProfile);
-
-    _file.open(
-        path,
-        std::ios::out |
-        std::ios::trunc
+    auto logger = std::make_shared<spdlog::logger>(
+        "global", 
+        spdlog::sinks_init_list{ fileSink, msvcSink }
     );
 
-    if (!_file.is_open()) {
-        return;
-    }
+    // Registra como padrão (NÃO chame spdlog::register_logger aqui!)
+    spdlog::set_default_logger(logger);
 
-    _initialized = true;
+    spdlog::set_level(spdlog::level::trace);
+    spdlog::flush_on(spdlog::level::info); // Força flush automático para INFO, WARN e ERROR
 
-    _file << "========================================\n";
-    _file << "Effect Debugger - START\n";
-    _file << "========================================\n";
-    _file.flush();
-}
+    // Garante que o spdlog descarregue o buffer para o disco a cada 1 segundo (sem travar as threads do jogo)
+    spdlog::flush_every(std::chrono::seconds(1));
 
-Logger::~Logger()
-{
-    if (_file.is_open()) {
-        _file.close();
-    }
+    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
+
+    spdlog::info("========================================");
+    spdlog::info("VisualEffect.Play(SKSE) - START");
+    spdlog::info("========================================");
 }

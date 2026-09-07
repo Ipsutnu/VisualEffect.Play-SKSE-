@@ -1,15 +1,3 @@
-/*
- * Copyright (c) 2026 Preguissoso
- *
- * This file is part of VisualEffect.Play(SKSE).
- *
- * The source code is available for viewing and reference purposes only.
- * Modification, redistribution, forking, and creation of derivative
- * works are not permitted without prior written permission.
- *
- * See LICENSE for the full license terms.
- */
-
 #include "PCH.h"
 
 #include "EffectDatabase.h"
@@ -536,7 +524,7 @@ namespace EffectDatabase
 
     std::vector<IdleData> cachedIdles;
 
-    // Execute esta função UMA VEZ ao inicializar a janela/menu, e não no loop de renderização!
+    // UMA VEZ ao inicializar a janela/menu!
     void BuildIdleDatabaseCache()
     {
         cachedIdles.clear();
@@ -801,7 +789,6 @@ namespace EffectDatabase
                 );
             }
 
-            // Muito importante:
             // limpa o ponteiro depois do Stop.
             EffectControl::activeImageSpaceModifier = nullptr;
         }
@@ -822,7 +809,7 @@ namespace EffectDatabase
         // 1. Verifica se o jogador existe e se o 3D está carregado
         if (!player || !player->Is3DLoaded())
         {
-            return; // Sai se o jogador ainda não existir ou o 3D não tiver carregado
+            return;
         }
 
         auto* controlMap = RE::ControlMap::GetSingleton();

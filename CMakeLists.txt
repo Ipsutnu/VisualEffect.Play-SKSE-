@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(EffectListener VERSION 1.2.0 LANGUAGES CXX)
+project(VisualEffectPlay VERSION 1.4.0 LANGUAGES CXX)
 
 # ============================================================
 # CommonLibSSE-NG
@@ -72,9 +72,11 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/Logger.cpp
         src/EffectControl.cpp
         src/EffectDatabase.cpp
+        src/RenderHooks.cpp
+        src/RenderManager.cpp
+        src/PresentHook.cpp
 
         ${IMGUI_SOURCES}
-        ${MINHOOK_SOURCES}
 )
 
 
@@ -103,7 +105,6 @@ target_precompile_headers(${PROJECT_NAME} PRIVATE
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
-    ${MINHOOK_DIR}/include
 )
 
 

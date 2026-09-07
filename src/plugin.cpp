@@ -1,25 +1,13 @@
-/*
- * Copyright (c) 2026 Preguissoso
- *
- * This file is part of VisualEffect.Play(SKSE).
- *
- * The source code is available for viewing and reference purposes only.
- * Modification, redistribution, forking, and creation of derivative
- * works are not permitted without prior written permission.
- *
- * See LICENSE for the full license terms.
- */
-
 #include "PCH.h"
 #include "Logger.h"
 
 #include "EffectDatabase.h"
 #include "EffectControl.h"
 
-inline bool g_postLoadGame = false;
+#include "RenderHooks.h"
+#include "RenderManager.h"
 
 bool g_showTestWindow = false;
-bool g_imguiInitialized = false;
 HWND g_gameWindow = nullptr;
 bool g_takeScreenshot = false;
 
@@ -80,15 +68,91 @@ public:
         RE::InputEvent* const* a_event,
         RE::BSTEventSource<RE::InputEvent*>*) override
     {
-        if (!g_showTestWindow)
-            return RE::BSEventNotifyControl::kContinue;
-        
         if (!a_event || !*a_event)
+            return RE::BSEventNotifyControl::kContinue;
+
+        // Converte a g_toggleKey (Virtual Key) para DX ScanCode para bater com o IDCode do Skyrim
+        const UINT targetScanCode = MapVirtualKeyA(g_toggleKey, MAPVK_VK_TO_VSC);
+        const bool isFunctionKey = (g_toggleKey >= VK_F1 && g_toggleKey <= VK_F24);
+
+        // ================================================================
+        // 1. CHECAGEM DA TECLA DINÂMICA (SUBSTITUTO DO CheckGKey)
+        // ================================================================
+        for (auto* event = *a_event; event; event = event->next)
+        {
+            if (event->eventType == RE::INPUT_EVENT_TYPE::kButton)
+            {
+                auto* buttonEvent = event->AsButtonEvent();
+                if (!buttonEvent || !buttonEvent->IsDown()) continue;
+
+                // Se for uma tecla normal (não F1-F24) e o ImGui estiver querendo digitação, ignora
+                if (!isFunctionKey &&
+                    ImGui::GetCurrentContext() &&
+                    ImGui::GetIO().WantTextInput)
+                {
+                    continue;
+                }
+
+                // Checa se a tecla pressionada é a g_toggleKey (compara via ScanCode ou VK se for estático)
+                if (buttonEvent->GetIDCode() == targetScanCode)
+                {
+                    const bool wasOpen = g_showTestWindow;
+                    g_showTestWindow = !g_showTestWindow;
+
+                    if (!wasOpen && g_showTestWindow)
+                    {
+                        if (EffectControl::firstOpen)
+                        {
+                            EffectControl::focusSearchOnOpen = true;
+                            EffectControl::firstOpen = false;
+                        }
+                        else if (EffectDatabase::selectedEffect)
+                        {
+                            EffectControl::focusLastEffectOnOpen = true;
+                        }
+                        else
+                        {
+                            EffectControl::focusSearchOnOpen = true;
+                        }
+                    }
+
+                    if (g_showTestWindow)
+                    {
+                        EffectDatabase::OnOpenImGui();
+                        EffectDatabase::ResetKeyboardStateOnMenuToggle();
+                    }
+                    else
+                    {
+                        SaveConfig();
+                        EffectDatabase::OnCloseImGui();
+                    }
+
+                    Logger::GetSingleton().Print(
+                        "Effect Debugger: TOGGLE KEY PRESSED -> {}",
+                        g_showTestWindow ? "OPEN" : "CLOSED"
+                    );
+
+                    // Consome a tecla para o jogo não reagir a ela
+                    buttonEvent->GetRuntimeData().value = 0.0f;
+                    buttonEvent->GetRuntimeData().heldDownSecs = 0.0f;
+                    buttonEvent->SetUserEvent("");
+                    buttonEvent->SetIDCode(0xFF);
+                    break;
+                }
+            }
+        }
+
+        // ================================================================
+        // 2. RESTRIÇÕES / TRAVAS APÓS O MENU ESTAR ABERTO
+        // ================================================================
+
+        // Se o menu estiver fechado, interrompe e não processa os bloqueios abaixo
+        if (!g_showTestWindow)
             return RE::BSEventNotifyControl::kContinue;
 
         auto* ui = RE::UI::GetSingleton();
 
-        // Se o Skyrim está em MenuMode, cancela bloqueio de input
+        // Se o Skyrim está em MenuMode (inventário, pause, etc.), libera os inputs
         if (ui && ui->IsItemMenuOpen())
         {
             return RE::BSEventNotifyControl::kContinue;
@@ -215,21 +279,23 @@ public:
 
             if (buttonEvent->GetDevice() == RE::INPUT_DEVICE::kKeyboard)
             {
-                const bool movementKeyDown =
-                    (GetAsyncKeyState(g_movementToggleKey) & 0x8000) != 0;
+                const auto key = buttonEvent->GetIDCode();
 
-                if (movementKeyDown && !movementKeyWasDown)
+                if (key == g_movementToggleKey)
                 {
-                    EffectDatabase::TogglePlayerMovement();
+                    const auto value = buttonEvent->GetRuntimeData().value;
 
-                    // Consome a tecla de toggle
-                    buttonEvent->GetRuntimeData().value = 0.0f;
-                    buttonEvent->GetRuntimeData().heldDownSecs = 0.0f;
-                    buttonEvent->SetUserEvent("");
-                    buttonEvent->SetIDCode(0xFF);
+                    if (value != 0.0f)
+                    {
+                        EffectDatabase::TogglePlayerMovement();
+
+                        // Consome somente o evento do toggle
+                        buttonEvent->GetRuntimeData().value = 0.0f;
+                        buttonEvent->GetRuntimeData().heldDownSecs = 0.0f;
+                        buttonEvent->SetUserEvent("");
+                        buttonEvent->SetIDCode(0xFF);
+                    }
                 }
-
-                movementKeyWasDown = movementKeyDown;
             }
 
             // ============================================================
@@ -307,28 +373,27 @@ void RegisterInputSink()
     // Registra o nosso sink
     deviceManager->AddEventSink(InputHandler::GetSingleton());
 
-    // Reordena os sinks para colocar o NOSSO no topo (índice 0)
-    // Isso garante que tratamos a tecla 'E' ANTES do PlayerControls do Skyrim
-    auto& sinks = deviceManager->sinks;
-
-    for (RE::BSTArray<RE::BSTEventSink<RE::InputEvent*>*>::size_type i = 0;
-        i < sinks.size();
-        ++i)
-    {
-        if (sinks[i] == InputHandler::GetSingleton())
-        {
-            std::swap(sinks[i], sinks[0]);
-            break;
-        }
-    }
+  
 }
 
 std::filesystem::path GetThemeDirectory()
 {
-    return std::filesystem::path("Data")
-        / "SKSE"
-        / "Plugins"
+    // Obtém a raiz exata de onde o SkyrimSE.exe está rodando
+    auto path = std::filesystem::current_path() 
+        / "Data" 
+        / "SKSE" 
+        / "Plugins" 
         / "Themes";
+
+    // Garante que a pasta 'Themes' exista no disco
+    std::error_code ec;
+    std::filesystem::create_directories(path, ec);
+
+    if (ec) {
+        Logger::GetSingleton().Print("Erro ao criar/acessar diretorio de temas: {}", ec.message());
+    }
+
+    return path;
 }
 
 std::vector<EffectDatabase::EffectEntry>& GetEffectsForType(
@@ -441,7 +506,8 @@ namespace ProcessInputQueueHook
             break;
 
         case 14:
-            key = ImGuiKey_Backspace;
+            //key = ImGuiKey_Backspace;
+            io.AddKeyEvent(ImGuiKey_Backspace, isPressed);
             break;
 
         case 15:
@@ -620,11 +686,11 @@ namespace ProcessInputQueueHook
             break;
         }
 
-        Logger::GetSingleton().Print(
-            "IMGUI MOUSE [{}] [{}]",
-            id,
-            pressed
-        );
+        //Logger::GetSingleton().Print(
+        //    "IMGUI MOUSE [{}] [{}]",
+        //    id,
+        //    pressed
+        //);
     }
     
 
@@ -633,7 +699,7 @@ namespace ProcessInputQueueHook
         RE::BSTEventSource<RE::InputEvent*>* dispatcher,
         RE::InputEvent* const* events)
     {
-        // Nunca tente processar uma lista inexistente.
+        // Nunca tenta processar uma lista inexistente.
         if (!dispatcher || !events)
         {
             return;
@@ -650,7 +716,7 @@ namespace ProcessInputQueueHook
 
         // ============================================================
         // Se o menu não está aberto:
-        // não mexemos na lista, apenas passamos para o Skyrim.
+        // não mexemos na lista, apenas passamos para o Skyrim!
         // ============================================================
 
         if (!g_showTestWindow)
@@ -755,7 +821,7 @@ namespace ProcessInputQueueHook
         }
 
         // ============================================================
-        // Passa a lista ORIGINAL para o Skyrim (sem modificações)
+        // Passa a lista ORIGINAL para o Skyrim
         // ============================================================
 
         originalFunction(dispatcher, events);
@@ -763,8 +829,8 @@ namespace ProcessInputQueueHook
 
     void Install()
     {
-        SKSE::AllocTrampoline(14);
 
+        SKSE::AllocTrampoline(14);
         auto& trampoline = SKSE::GetTrampoline();
 
         originalFunction =
@@ -784,130 +850,6 @@ namespace ProcessInputQueueHook
             );
     }
 }
-
-LRESULT CALLBACK WndProcHook(
-    HWND hWnd,
-    UINT msg,
-    WPARAM wParam,
-    LPARAM lParam)
-{
-    if (g_showTestWindow && g_imguiInitialized)
-    {
-
-        if (msg == WM_CHAR)
-        {
-            Logger::GetSingleton().Print(
-                "WM_CHAR: {}",
-                static_cast<int>(wParam)
-            );
-        }
-
-        ImGui_ImplWin32_WndProcHandler(
-            hWnd,
-            msg,
-            wParam,
-            lParam
-        );
-
-        ImGuiIO& io = ImGui::GetIO();
-
-        if (io.WantCaptureMouse)
-        {
-            switch (msg)
-            {
-            case WM_MOUSEMOVE:
-            case WM_LBUTTONDOWN:
-            case WM_LBUTTONUP:
-            case WM_RBUTTONDOWN:
-            case WM_RBUTTONUP:
-            case WM_MBUTTONDOWN:
-            case WM_MBUTTONUP:
-            case WM_MOUSEWHEEL:
-            case WM_MOUSEHWHEEL:
-                return 0;
-            }
-        }
-
-        
-        if (io.WantCaptureKeyboard)
-        {
-            switch (msg)
-            {
-            case WM_KEYDOWN:
-            case WM_KEYUP:
-            case WM_CHAR:
-            case WM_SYSKEYDOWN:
-            case WM_SYSKEYUP:
-            case WM_SYSCHAR:
-                return 0;
-            }
-        }
-    }
-
-    return CallWindowProc(
-        g_originalWndProc,
-        hWnd,
-        msg,
-        wParam,
-        lParam
-    );
-}
-
-bool InitializeWndProcHook()
-{
-    Logger::GetSingleton().Print(
-        "WndProc: InitializeWndProcHook called"
-    );
-
-    Logger::GetSingleton().Print(
-        "WndProc: HWND = {}",
-        reinterpret_cast<std::uintptr_t>(g_gameWindow)
-    );
-
-    if (!g_gameWindow)
-    {
-        Logger::GetSingleton().Print(
-            "WndProc: game window is null"
-        );
-
-        return false;
-    }
-
-    if (g_originalWndProc)
-    {
-        Logger::GetSingleton().Print(
-            "WndProc: already installed"
-        );
-
-        return true;
-    }
-
-    g_originalWndProc =
-        reinterpret_cast<WNDPROC>(
-            SetWindowLongPtrW(
-                g_gameWindow,
-                GWLP_WNDPROC,
-                reinterpret_cast<LONG_PTR>(WndProcHook)
-            )
-        );
-
-    if (!g_originalWndProc)
-    {
-        Logger::GetSingleton().Print(
-            "WndProc: SetWindowLongPtr FAILED"
-        );
-
-        return false;
-    }
-
-    Logger::GetSingleton().Print(
-        "WndProc: hook installed successfully"
-    );
-
-    return true;
-}
-
-
 
 
 namespace EffectDatabase
@@ -999,7 +941,7 @@ namespace EffectDatabase
         const std::vector<EffectEntry*>& effects,
         EffectType type)
     {
-        // Texto que aparece na interface continua exatamente igual
+        
         int matchCount = 0;
 
         for (auto* effect : effects)
@@ -1141,10 +1083,7 @@ namespace EffectDatabase
             true
         );
 
-        ImGui::Text(
-            "EFFECT LIBRARY"
-        );
-
+        ImGui::Text("EFFECT LIBRARY");
         ImGui::Separator();
 
         if (g_requestTabFocus &&
@@ -1152,45 +1091,49 @@ namespace EffectDatabase
         {
             ImGui::SetWindowFocus("EffectBrowser");    
             ImGui::SetKeyboardFocusHere();
-
             g_requestTabFocus = false;
         }
 
         if (EffectControl::focusSearchOnOpen)
         {
-           ImGui::SetKeyboardFocusHere();
+            ImGui::SetKeyboardFocusHere();
             EffectControl::focusSearchOnOpen = false;
             g_tabFocusIndex = static_cast<int>(TabFocus::Effects);
         }
-        
 
         // 1. Campo de busca
         ImGui::PushItemWidth(200.0f);
         bool textChanged = ImGui::InputText("##Search", searchBuffer, sizeof(searchBuffer));
+        
+        // CAPTURA SE O HOVER E FOCUS ESTÃO NO INPUTTEXT (ANTES DE DESENHAR O RADIOBUTTON)
+        const bool searchIsHovered = ImGui::IsItemHovered();
+        const bool searchIsFocused = ImGui::IsItemFocused();
+        const bool searchIsActive  = ImGui::IsItemActive();
+        const ImGuiID searchID     = ImGui::GetItemID();
+
         ImGui::PopItemWidth();
 
         ImGui::SameLine(0.0f, 10.0f);
 
-        // 2. RadioButton pequeno usado como botão de gatilho (sempre passa false)
+        // 2. RadioButton / Botão de Colar
         if (ImGui::RadioButton("##PasteRadio", false))
         {
             if (const char* clipboard = ImGui::GetClipboardText())
             {
                 strncpy_s(searchBuffer, sizeof(searchBuffer), clipboard, _TRUNCATE);
-                textChanged = true; // Força a atualização do g_searchLower
+                textChanged = true;
+                
+                // Restaura o foco para o campo de busca imediatamente ao colar
+                ImGui::ActivateItemByID(searchID);
             }
         }
 
-        // Tooltip para o usuário saber o que a bolinha faz ao passar o mouse por cima
         if (ImGui::IsItemHovered())
         {
             ImGui::SetTooltip("Paste from clipboard");
         }
 
-        //ImGui::SameLine();
-        //ImGui::Text("Search"); // Rótulo ao lado
-
-        // 3. Processa a string se houve mudança (digitada ou colada)
+        // 3. Processa a string
         if (textChanged)
         {
             g_searchLower = searchBuffer;
@@ -1199,35 +1142,30 @@ namespace EffectDatabase
         }
 
         // ------------------------------------------------------------
-        // Trava: Detecta se o usuário clicou fora do campo de busca
+        // Trava: Usa as variáveis capturadas do InputText
         // ------------------------------------------------------------
-        bool clickedOutsideField = ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::IsItemHovered();
+        // Só considera que "clicou fora" se clicou com o botão esquerdo
+        // E o mouse NÃO estava no InputText E o mouse NÃO estava no RadioButton de paste
+        const bool clickedRadio = ImGui::IsItemHovered(); // Nesse ponto, IsItemHovered() refere-se ao RadioButton
+        const bool clickedOutsideField = ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !searchIsHovered && !clickedRadio;
 
         if (clickedOutsideField)
         {
-            // Se clicou fora, reseta o estado e impede que a caixa de texto seja reativada
             EffectControl::searchOpenedWithFocus = false;
         }
-        else if (ImGui::IsItemFocused())
+        else if (searchIsFocused)
         {
-            // Se chegou aqui porque o menu acabou de abrir,
-            // apenas mantém o foco no Search.
             if (EffectControl::searchOpenedWithFocus)
             {
                 // Não ativa a edição.
             }
-            else if (!ImGui::IsItemActive())
+            else if (!searchIsActive)
             {
-                // Chegou ao Search pela navegação (setas do teclado):
-                // entra automaticamente em edição.
-                ImGui::ActivateItemByID(ImGui::GetItemID());
+                ImGui::ActivateItemByID(searchID);
             }
         }
         else
         {
-            // Saiu do Search.
-            // Da próxima vez que voltar por ↑/↓,
-            // poderá entrar automaticamente em edição.
             EffectControl::searchOpenedWithFocus = false;
         }
 
@@ -1469,10 +1407,27 @@ namespace EffectDatabase
                     selectedType
                 );
 
-            ImGui::SameLine(
-                isFavorite ? 145.0f : 95.0f, // 1º argumento: offset_from_start_x
-                0.0f                        // 2º argumento: spacing_w
-            );
+            // ============================================================
+            // ALINHAMENTO DINÂMICO À DIREITA
+            // ============================================================
+            
+            // 1. Define o rótulo do botão
+            const char* buttonLabel = isFavorite ? "FAVORITES" : "Add to Favorites";
+
+            // 2. Calcula a largura do botão (Texto + Padding interno do estilo do ImGui)
+            const float buttonWidth = ImGui::CalcTextSize(buttonLabel).x + (ImGui::GetStyle().FramePadding.x * 2.0f);
+
+            // 3. Define a folga da borda direita da janela (em pixels)
+            const float paddingRight = 10.0f;
+
+            // 4. Garante que fique na mesma linha do "INSPECTOR"
+            ImGui::SameLine();
+
+            // 5. Calcula o limite direito da área útil da janela e posiciona o cursor
+            const float rightEdgeX = ImGui::GetWindowContentRegionMax().x;
+            ImGui::SetCursorPosX(rightEdgeX - buttonWidth - paddingRight);
+
+            // ============================================================
 
             ImGui::PushStyleColor(
                 ImGuiCol_Text,
@@ -1481,8 +1436,7 @@ namespace EffectDatabase
                     : IM_COL32(120, 120, 120, 255)
             );
 
-            if (ImGui::Button(
-                    isFavorite ? "FAVORITES" : "Add to Favorites"))
+            if (ImGui::Button(buttonLabel))
             {
                 EffectDatabase::ToggleFavorite(
                     selectedEffect,
@@ -2694,6 +2648,21 @@ namespace EffectDatabase
         ImGui::EndChild();
     }
 
+    void ResetKeyboardStateOnMenuToggle()
+    {
+        ImGuiIO& io = ImGui::GetIO();
+
+        g_UpArrowDown = false;
+        g_DownArrowDown = false;
+
+        io.AddKeyEvent(ImGuiKey_UpArrow, false);
+        io.AddKeyEvent(ImGuiKey_DownArrow, false);
+        io.AddKeyEvent(ImGuiKey_LeftArrow, false);
+        io.AddKeyEvent(ImGuiKey_RightArrow, false);
+
+        //io.ClearEventsQueue();
+    }
+
     enum class FavDockState {
         Free,           // Livre pela tela
         Right_Top,      // Direita / Topo  -> Cresce p/ BAIXO (Vermelho)
@@ -2713,6 +2682,21 @@ namespace EffectDatabase
         float snapThreshold = 200.0f; // Distância em pixels para ativar o "ímã"
         float snapThresholdBottom = 30.0f; // "ímã" da caixa bottom
 
+        // -------------------------------------------------------------
+        // RESTAURAR ESTADO DO DOCK DO IMGUI.INI (APENAS NA PRIMEIRA VEZ)
+        // -------------------------------------------------------------
+        static bool isStateLoaded = false;
+        ImGuiID favID = ImGui::GetID("###FavoriteWindow");
+        ImGuiStorage* storage = ImGui::GetStateStorage();
+
+        if (!isStateLoaded)
+        {
+            // Lê o estado salvo no ini (0 = padrão/Right_Top se não existir)
+            int savedDock = storage->GetInt(favID, (int)FavDockState::Right_Top);
+            currentDock = static_cast<FavDockState>(savedDock);
+            isStateLoaded = true;
+        }
+        
         // -------------------------------------------------------------
         // 1. APLICAR POSIÇÃO APENAS SE NÃO ESTIVER ARRASTANDO
         // -------------------------------------------------------------
@@ -2770,13 +2754,18 @@ namespace EffectDatabase
         //No ImGui, o título da janela no ImGui::Begin() serve tanto como o texto visível no cabeçalho
         //quanto como a ID única interna daquela janela no motor do ImGui.
 
-        //Se você passar uma string vazia "" ou espaços " ", o ImGui pode ter problemas de colisão de ID.
+        //Se passar uma string vazia "" ou espaços " ", o ImGui pode ter problemas de colisão de ID.
         //A forma correta e recomendada pelo ImGui para ocultar ou deixar um título em branco é usar o separador de ID ###.
 
         //A Solução Nativa: ###
         //Escreva apenas os três jogo da velha seguidos de um identificador único qualquer:
 
         ImGui::Begin("###FavoriteWindow", nullptr, favFlags);
+
+        // -------------------------------------------------------------
+        // SALVAR SEMPRE QUE O ESTADO MUDAR
+        // -------------------------------------------------------------
+        storage->SetInt(favID, (int)currentDock);
 
         ImVec2 currentFavPos  = ImGui::GetWindowPos();
         ImVec2 currentFavSize = ImGui::GetWindowSize();
@@ -3776,12 +3765,24 @@ namespace EffectDatabase
     void DrawThemeCustomizer()
     {
         ImGuiStyle* style = &ImGui::GetStyle();
+        ImGuiIO& io = ImGui::GetIO();
 
         if (ImGui::CollapsingHeader("Style"))
         {
             ImGui::Text("Layout");
             ImGui::Separator();
 
+            if (ImGui::DragFloat(
+                "Font Size",
+                &io.FontGlobalScale,
+                0.01f,   // Velocidade do arraste
+                0.5f,    // Escala mínima (50%)
+                2.5f,    // Escala máxima (250%)
+                "%.2fx")) // Formatação visual (ex: 1.00x, 1.25x)
+            {
+                g_themeDirty = true;
+            }
+            
             if (ImGui::DragFloat2(
                 "WindowPadding",
                 reinterpret_cast<float*>(&style->WindowPadding),
@@ -4888,7 +4889,17 @@ namespace EffectDatabase
 
     void DrawMenu()
     {
-        
+        static bool lastShowState = false;
+
+        if (lastShowState != g_showTestWindow)
+        {
+            Logger::GetSingleton().Print(
+                "DrawMenu: g_showTestWindow = {}",
+                g_showTestWindow ? "TRUE" : "FALSE"
+            );
+
+            lastShowState = g_showTestWindow;
+        }
         //UpdateIdle();
         EffectDatabase::UpdateImageSpaceModifier();
         
@@ -4898,9 +4909,14 @@ namespace EffectDatabase
             return;
         }
 
+        // 1. Força um tamanho e posição inicial razoáveis se for a primeira vez ou estiver perdida
+        ImGui::SetNextWindowPos(ImVec2(100, 100), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(600, 800), ImGuiCond_FirstUseEver);
+
+
         
         //EffectDatabase::ApplyPlayerMovementState();
-        EffectDatabase::OnOpenImGui();
+
 
 
         //RE::PlayerCharacter* player =
@@ -4916,15 +4932,15 @@ namespace EffectDatabase
         //    return;
         //}
 
-        ImGui::SetNextWindowSize(
-            ImVec2(1100.0f, 700.0f),
-            ImGuiCond_FirstUseEver
-        );
+        //ImGui::SetNextWindowSize(
+        //    ImVec2(1100.0f, 700.0f),
+        //    ImGuiCond_FirstUseEver
+        //);
 
         bool wasOpen = g_showTestWindow;
 
         ImGui::Begin(
-            "Effect Debugger",
+            "VisualEffect.Play(SKSE)",
             &g_showTestWindow
         );
 
@@ -5065,6 +5081,8 @@ namespace EffectDatabase
 
         ImGui::Separator();
 
+        DrawFavoritesWindow(mainPos, mainSize);
+
         if (ImGui::BeginTable(
             "MainLayout",
             2, 
@@ -5073,7 +5091,7 @@ namespace EffectDatabase
         {
             // 2. Entre na Coluna 0 ANTES de desenhar os Favoritos
             //ImGui::TableNextColumn();
-            DrawFavoritesWindow(mainPos, mainSize);
+            
 
             // 3. Coluna 1
             ImGui::TableNextColumn();
@@ -5209,832 +5227,6 @@ namespace EffectDatabase
 
 }
 
-
-namespace
-{
-    using Present_t = HRESULT(__stdcall*)(
-        IDXGISwapChain*,
-        UINT,
-        UINT
-    );
-
-    Present_t g_originalPresent = nullptr;
-
-
-    
-    bool g_lastGState = false;
-
-    ID3D11Device* g_device = nullptr;
-    ID3D11DeviceContext* g_context = nullptr;
-    ID3D11RenderTargetView* g_renderTarget = nullptr;
-
-    void ResetKeyboardStateOnMenuToggle()
-    {
-        ImGuiIO& io = ImGui::GetIO();
-
-        g_UpArrowDown = false;
-        g_DownArrowDown = false;
-
-        io.AddKeyEvent(ImGuiKey_UpArrow, false);
-        io.AddKeyEvent(ImGuiKey_DownArrow, false);
-        io.AddKeyEvent(ImGuiKey_LeftArrow, false);
-        io.AddKeyEvent(ImGuiKey_RightArrow, false);
-
-        //io.ClearEventsQueue();
-    }
-
-
-    // ============================================================
-    // G KEY
-    // ============================================================
-
-    void CheckGKey()
-    {
-
-        //auto* player = RE::PlayerCharacter::GetSingleton();
-
-        //if (!player || !player->Is3DLoaded())
-        //{
-        //    return; // Sai da função se o jogador não existir
-        //}
-
-        // Verifica se a tecla configurada em g_toggleKey é uma tecla de função (F1 até F24)
-        const bool isFunctionKey = (g_toggleKey >= VK_F1 && g_toggleKey <= VK_F24);
-
-        if (!isFunctionKey && ImGui::GetIO().WantTextInput)
-        {
-            return;
-        }
-
-            const bool currentG =
-                 (GetAsyncKeyState(g_toggleKey) & 0x8000) != 0;
-
-            if (currentG && !g_lastGState)
-            {
-
-                const bool wasOpen = g_showTestWindow;
-                
-                g_showTestWindow = !g_showTestWindow;
-
-                if (!wasOpen && g_showTestWindow)
-                {
-                    if (EffectControl::firstOpen)
-                    {
-                        EffectControl::focusSearchOnOpen = true;
-                        EffectControl::firstOpen = false;
-                    }
-                    else if (EffectDatabase::selectedEffect)
-                    {
-                        EffectControl::focusLastEffectOnOpen = true;
-                    }
-                    else if (!EffectDatabase::selectedEffect)
-                    {
-                        EffectControl::focusSearchOnOpen = true;
-                    }
-
-                }
-
-                if (g_showTestWindow)
-                {   
-                    
-                    ResetKeyboardStateOnMenuToggle();
-                    
-                }
-                else
-                {
-                    SaveConfig();
-                    EffectDatabase::OnCloseImGui();
-                }
-
-                Logger::GetSingleton().Print(
-                    "Effect Debugger: G PRESSED -> {}",
-                    g_showTestWindow
-                        ? "OPEN"
-                        : "CLOSED"
-                );
-            }
-
-            g_lastGState = currentG;
-    
-        
-    }
-
-    // ============================================================
-    // IMGUI INITIALIZATION
-    // ============================================================
-
-    bool InitializeImGui(IDXGISwapChain* swapChain)
-    {
-        if (g_imguiInitialized)
-            return true;
-
-        if (!swapChain)
-            return false;
-
-        DXGI_SWAP_CHAIN_DESC desc{};
-
-        if (FAILED(swapChain->GetDesc(&desc)))
-        {
-            Logger::GetSingleton().Print(
-                "ImGui: GetDesc failed"
-            );
-
-            return false;
-        }
-
-        // PEGAMOS A JANELA DO SKYRIM
-        g_gameWindow = desc.OutputWindow;
-
-        Logger::GetSingleton().Print(
-            "ImGui: Game HWND = {}",
-            reinterpret_cast<std::uintptr_t>(g_gameWindow)
-        );
-
-        if (!g_gameWindow)
-        {
-            Logger::GetSingleton().Print(
-                "ImGui: OutputWindow is NULL"
-            );
-
-            return false;
-        }
-
-        if (FAILED(
-            swapChain->GetDevice(
-                __uuidof(ID3D11Device),
-                reinterpret_cast<void**>(&g_device)
-            )))
-        {
-            return false;
-        }
-
-        g_device->GetImmediateContext(&g_context);
-
-        ID3D11Texture2D* backBuffer = nullptr;
-
-        if (FAILED(
-            swapChain->GetBuffer(
-                0,
-                __uuidof(ID3D11Texture2D),
-                reinterpret_cast<void**>(&backBuffer)
-            )))
-        {
-            return false;
-        }
-
-        HRESULT hr =
-            g_device->CreateRenderTargetView(
-                backBuffer,
-                nullptr,
-                &g_renderTarget
-            );
-
-        backBuffer->Release();
-
-        if (FAILED(hr))
-            return false;
-
-        IMGUI_CHECKVERSION();
-
-        ImGui::CreateContext();
-        
-            
-        ImGuiIO& io = ImGui::GetIO();
-
-        
-
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
-        //io.ConfigDebugHighlightIdConflicts = false;
-        io.KeyRepeatDelay = 0.30f;
-        io.KeyRepeatRate = 0.06f;
-
-        //ImGui::StyleColorsDark();
-        //ImGuiStyle& style = ImGui::GetStyle();
-        
-
-        //EffectDatabase::ApplyPurpleTheme();
-        //    EffectDatabase::LoadThemes();
-        //EffectDatabase::LoadCurrentTheme();
-
-        EffectDatabase::LoadDefaultTheme();
-
-        EffectDatabase::LoadThemes();
-
-        EffectDatabase::LoadCurrentTheme();
-
-        if (!InitializeWndProcHook())
-        {
-            Logger::GetSingleton().Print(
-                "ImGui: WndProc hook FAILED"
-            );
-
-            //ImGui_ImplDX11_Shutdown();
-            //ImGui_ImplWin32_Shutdown();
-            ImGui::DestroyContext();
-
-            return false;
-        }
-
-        if (!ImGui_ImplWin32_Init(g_gameWindow))
-        {
-            Logger::GetSingleton().Print(
-                "ImGui: Win32 Init FAILED"
-            );
-
-            ImGui::DestroyContext();
-            return false;
-        }
-
-        
-
-        if (!ImGui_ImplDX11_Init(
-            g_device,
-            g_context))
-        {
-            Logger::GetSingleton().Print(
-                "ImGui: DX11 Init FAILED"
-            );
-
-            ImGui_ImplWin32_Shutdown();
-            ImGui::DestroyContext();
-
-            return false;
-        }
-
-        // AGORA SIM: g_gameWindow já existe
-        
-
-        g_imguiInitialized = true;
-
-        Logger::GetSingleton().Print(
-            "ImGui: initialized successfully"
-        );
-
-        return true;
-    }
-
-
-    // ============================================================
-    // TEST WINDOW
-    // ============================================================
-
-    void DrawTestWindow()
-    {
-        if (!g_showTestWindow)
-            return;
-
-        ImGui::SetNextWindowSize(
-            ImVec2(400.0f, 200.0f),
-            ImGuiCond_FirstUseEver
-        );
-
-        ImGui::Begin(
-            "Effect Debugger TEST",
-            &g_showTestWindow
-        );
-
-        ImGui::Text(
-            "SUCCESS!"
-        );
-
-        ImGui::Separator();
-
-        ImGui::Text(
-            "Present Hook is working."
-        );
-
-        ImGui::Text(
-            "G key was detected."
-        );
-
-        ImGui::Text(
-            "ImGui is rendering."
-        );
-
-        //if (ImGui::Button("Close"))
-        //{
-        //    g_showTestWindow = false;
-
-        //    SaveConfig();
-        //    EffectDatabase::OnCloseImGui();
-        //}
-
-        ImGui::End();
-    }
-
-
-    // ============================================================
-    // PRESENT HOOK
-    // ============================================================
-
-    HRESULT __stdcall PresentHook(
-        IDXGISwapChain* swapChain,
-        UINT syncInterval,
-        UINT flags)
-    {
-        static bool logged = false;
-
-        if (!logged)
-        {
-            logged = true;
-            Logger::GetSingleton().Print("Effect Debugger: PRESENT HOOK RUNNING");
-        }
-
-        if (!swapChain)
-        {
-            return g_originalPresent(swapChain, syncInterval, flags);
-        }
-
-        // Inicializar se ainda não foi feito
-        if (!g_imguiInitialized)
-        {
-            InitializeImGui(swapChain);
-        }
-
-        // Garante que o contexto, dispositivo e render target são 100% válidos antes de tocar no ImGui
-        if (g_imguiInitialized && g_device && g_context && g_renderTarget)
-        {
-            // 1. Inicia o Frame do ImGui com segurança
-            ImGui_ImplDX11_NewFrame();
-            ImGui_ImplWin32_NewFrame();
-            ImGui::NewFrame();
-
-            // 2. Trata Inputs de Mouse se a janela estiver visível
-            if (g_showTestWindow)
-            {
-                POINT point{};
-                if (GetCursorPos(&point))
-                {
-                    if (g_gameWindow)
-                    {
-                        ScreenToClient(g_gameWindow, &point);
-                        ImGui::GetIO().AddMousePosEvent(
-                            static_cast<float>(point.x),
-                            static_cast<float>(point.y)
-                        );
-                    }
-                }
-            }
-
-            ImGui::GetIO().MouseDrawCursor = g_showTestWindow;
-
-            const float deltaTime = ImGui::GetIO().DeltaTime;
-
-            // Fading do Menu
-            if (g_showTestWindow)
-            {
-                globalAlpha += deltaTime * fadeSpeed;
-                if (globalAlpha > 1.0f) globalAlpha = 1.0f;
-            }
-            else
-            {
-                globalAlpha -= deltaTime * fadeSpeed;
-                if (globalAlpha < 0.0f) globalAlpha = 0.0f;
-            }
-
-            // Renderiza o menu apenas se o Alpha for maior que zero para economizar draw calls
-            if (globalAlpha > 0.0f)
-            {
-                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, globalAlpha);
-                EffectDatabase::DrawMenu();
-                ImGui::PopStyleVar();
-            }
-
-            // 3. Conclui o cálculo de vértices do ImGui
-            ImGui::Render();
-
-            // 4. Salva o RenderTarget anterior do Skyrim para NÃO corromper os outros mods (OAR/IED)
-            ID3D11RenderTargetView* oldRenderTargetViews[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = { nullptr };
-            ID3D11DepthStencilView* oldDepthStencilView = nullptr;
-            g_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, oldRenderTargetViews, &oldDepthStencilView);
-
-            // Define o nosso RenderTarget do ImGui
-            g_context->OMSetRenderTargets(1, &g_renderTarget, nullptr);
-            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
-            // RESTAURA o RenderTarget do jogo/outros mods
-            g_context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, oldRenderTargetViews, oldDepthStencilView);
-
-            // Libera os ponteiros de com obtidos pelo OMGetRenderTargets
-            for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; ++i)
-            {
-                if (oldRenderTargetViews[i]) oldRenderTargetViews[i]->Release();
-            }
-            if (oldDepthStencilView) oldDepthStencilView->Release();
-
-            // 5. Screenshot Logic
-            if (g_takeScreenshot)
-            {
-                g_takeScreenshot = false;
-                ID3D11Texture2D* backBuffer = nullptr;
-
-                const HRESULT hr = swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-
-                if (SUCCEEDED(hr) && backBuffer)
-                {
-                    const auto path = MakeScreenshotPath();
-                    if (!path.empty())
-                    {
-                        const bool saved = SaveTextureToPNG(g_device, g_context, backBuffer, path);
-                        if (saved)
-                        {
-                            SYSTEMTIME time{};
-                            GetLocalTime(&time);
-                            char dateTime[64]{};
-                            sprintf_s(dateTime, "%02d/%02d/%04d %02d:%02d:%02d",
-                                time.wDay, time.wMonth, time.wYear,
-                                time.wHour, time.wMinute, time.wSecond);
-
-                            g_screenshotNotification = std::string("Saved!\nDate: ") + dateTime + "\nLocal: " + path.string();
-                            g_screenshotNotificationTime = 5.0f;
-                        }
-                        else
-                        {
-                            g_screenshotNotification = "Error";
-                            g_screenshotNotificationTime = 3.0f;
-                        }
-                    }
-                    else
-                    {
-                        g_screenshotNotification = "Error: no folder.";
-                        g_screenshotNotificationTime = 3.0f;
-                    }
-                    backBuffer->Release();
-                }
-                else
-                {
-                    g_screenshotNotification = "Error in backbuffer.";
-                    g_screenshotNotificationTime = 3.0f;
-                }
-            }
-        }
-
-        return g_originalPresent(swapChain, syncInterval, flags);
-    }
-
-
-    // ============================================================
-    // NOVO PRESENT HOOK
-    // ============================================================
-
-    bool InitializePresentHook()
-    {
-        Logger::GetSingleton().Print(
-            "Effect Debugger: Initializing DX11 Present hook..."
-        );
-
-        WNDCLASSEXA wc{};
-        wc.cbSize = sizeof(WNDCLASSEXA);
-        wc.lpfnWndProc = DefWindowProcA;
-        wc.hInstance = GetModuleHandleA(nullptr);
-        wc.lpszClassName = "EffectDebuggerDummy";
-
-        const ATOM atom = RegisterClassExA(&wc);
-
-        if (!atom && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
-        {
-            Logger::GetSingleton().Print(
-                "Effect Debugger: RegisterClassExA FAILED: {}",
-                static_cast<unsigned>(GetLastError())
-            );
-
-            return false;
-        }
-
-        HWND hwnd = CreateWindowExA(
-            0,
-            wc.lpszClassName,
-            "EffectDebuggerDummy",
-            WS_OVERLAPPEDWINDOW,
-            0,
-            0,
-            100,
-            100,
-            nullptr,
-            nullptr,
-            wc.hInstance,
-            nullptr
-        );
-
-        if (!hwnd)
-        {
-            Logger::GetSingleton().Print(
-                "Effect Debugger: CreateWindow FAILED: {}",
-                static_cast<unsigned>(GetLastError())
-            );
-
-            return false;
-        }
-
-        DXGI_SWAP_CHAIN_DESC swapDesc{};
-        swapDesc.BufferCount = 1;
-        swapDesc.BufferDesc.Width = 100;
-        swapDesc.BufferDesc.Height = 100;
-        swapDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        swapDesc.OutputWindow = hwnd;
-        swapDesc.SampleDesc.Count = 1;
-        swapDesc.Windowed = TRUE;
-        swapDesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-
-        ID3D11Device* device = nullptr;
-        ID3D11DeviceContext* context = nullptr;
-        IDXGISwapChain* swapChain = nullptr;
-
-        D3D_FEATURE_LEVEL featureLevel{};
-
-        Logger::GetSingleton().Print(
-            "Effect Debugger: Creating temporary DX11 device..."
-        );
-
-        const HRESULT hr = D3D11CreateDeviceAndSwapChain(
-            nullptr,
-            D3D_DRIVER_TYPE_HARDWARE,
-            nullptr,
-            0,
-            nullptr,
-            0,
-            D3D11_SDK_VERSION,
-            &swapDesc,
-            &swapChain,
-            &device,
-            &featureLevel,
-            &context
-        );
-
-        if (FAILED(hr))
-        {
-            Logger::GetSingleton().Print(
-                "Effect Debugger: D3D11CreateDeviceAndSwapChain FAILED: {:08X}",
-                static_cast<unsigned>(hr)
-            );
-
-            if (context)
-                context->Release();
-
-            if (device)
-                device->Release();
-
-            if (swapChain)
-                swapChain->Release();
-
-            DestroyWindow(hwnd);
-
-            if (atom)
-            {
-                UnregisterClassA(
-                    wc.lpszClassName,
-                    wc.hInstance
-                );
-            }
-
-            return false;
-        }
-
-        if (!swapChain)
-        {
-            Logger::GetSingleton().Print(
-                "Effect Debugger: swapChain is NULL"
-            );
-
-            if (context)
-                context->Release();
-
-            if (device)
-                device->Release();
-
-            DestroyWindow(hwnd);
-
-            if (atom)
-            {
-                UnregisterClassA(
-                    wc.lpszClassName,
-                    wc.hInstance
-                );
-            }
-
-            return false;
-        }
-
-        //
-        // IDXGISwapChain::Present = vtable[8]
-        //
-        void** vtable =
-            *reinterpret_cast<void***>(swapChain);
-
-        if (!vtable)
-        {
-            Logger::GetSingleton().Print(
-                "Effect Debugger: SwapChain vtable is NULL"
-            );
-
-            if (context)
-                context->Release();
-
-            if (device)
-                device->Release();
-
-            swapChain->Release();
-
-            DestroyWindow(hwnd);
-
-            if (atom)
-            {
-                UnregisterClassA(
-                    wc.lpszClassName,
-                    wc.hInstance
-                );
-            }
-
-            return false;
-        }
-
-        void* presentAddress = vtable[8];
-
-        Logger::GetSingleton().Print(
-            "Effect Debugger: Present address = {}",
-            presentAddress
-        );
-
-        if (!presentAddress)
-        {
-            Logger::GetSingleton().Print(
-                "Effect Debugger: Present address is NULL"
-            );
-
-            if (context)
-                context->Release();
-
-            if (device)
-                device->Release();
-
-            swapChain->Release();
-
-            DestroyWindow(hwnd);
-
-            if (atom)
-            {
-                UnregisterClassA(
-                    wc.lpszClassName,
-                    wc.hInstance
-                );
-            }
-
-            return false;
-        }
-
-        //
-        // IMPORTANT:
-        // Não tenta criar o hook novamente.
-        //
-        Logger::GetSingleton().Print(
-            "Effect Debugger: BEFORE MH_CreateHook"
-        );
-
-        MH_STATUS status = MH_CreateHook(
-            presentAddress,
-            reinterpret_cast<void*>(&PresentHook),
-            reinterpret_cast<void**>(&g_originalPresent)
-        );
-
-        Logger::GetSingleton().Print(
-            "Effect Debugger: AFTER MH_CreateHook = {}",
-            static_cast<int>(status)
-        );
-
-        if (status != MH_OK)
-        {
-            Logger::GetSingleton().Print(
-                "Effect Debugger: MH_CreateHook FAILED: {}",
-                static_cast<int>(status)
-            );
-
-            if (context)
-                context->Release();
-
-            if (device)
-                device->Release();
-
-            swapChain->Release();
-
-            DestroyWindow(hwnd);
-
-            if (atom)
-            {
-                UnregisterClassA(
-                    wc.lpszClassName,
-                    wc.hInstance
-                );
-            }
-
-            return false;
-        }
-
-        Logger::GetSingleton().Print(
-            "Effect Debugger: BEFORE MH_EnableHook"
-        );
-
-        status = MH_EnableHook(presentAddress);
-
-        Logger::GetSingleton().Print(
-            "Effect Debugger: AFTER MH_EnableHook = {}",
-            static_cast<int>(status)
-        );
-
-        if (status != MH_OK)
-        {
-            Logger::GetSingleton().Print(
-                "Effect Debugger: MH_EnableHook FAILED: {}",
-                static_cast<int>(status)
-            );
-
-            MH_RemoveHook(presentAddress);
-
-            if (context)
-                context->Release();
-
-            if (device)
-                device->Release();
-
-            swapChain->Release();
-
-            DestroyWindow(hwnd);
-
-            if (atom)
-            {
-                UnregisterClassA(
-                    wc.lpszClassName,
-                    wc.hInstance
-                );
-            }
-
-            return false;
-        }
-
-        if (context)
-            context->Release();
-
-        if (device)
-            device->Release();
-
-        swapChain->Release();
-
-        DestroyWindow(hwnd);
-
-        if (atom)
-        {
-            UnregisterClassA(
-                wc.lpszClassName,
-                wc.hInstance
-            );
-        }
-
-        Logger::GetSingleton().Print(
-            "Effect Debugger: PRESENT HOOK INITIALIZED"
-        );
-
-        return true;
-    }
-
-
-    // ============================================================
-    // MINHOOK
-    // ============================================================
-
-    bool InitializeMinHook()
-    {
-        static bool initialized = false;
-
-        if (initialized)
-            return true;
-
-        MH_STATUS status =
-            MH_Initialize();
-
-        if (status == MH_OK ||
-            status == MH_ERROR_ALREADY_INITIALIZED)
-        {
-            initialized = true;
-
-            Logger::GetSingleton().Print(
-                "Effect Debugger: MINHOOK INITIALIZED"
-            );
-
-            return true;
-        }
-
-        Logger::GetSingleton().Print(
-            "Effect Debugger: MINHOOK FAILED: {}",
-            static_cast<int>(status)
-        );
-
-        return false;
-    }
-}
-
-
-
 void VerifySurvivalMode()
 {
     auto* dataHandler = RE::TESDataHandler::GetSingleton();
@@ -6073,93 +5265,97 @@ SKSEPluginLoad(
         return false;
     }
 
+
     messaging->RegisterListener(
         [](SKSE::MessagingInterface::Message* message)
         {
             if (!message)
+            {
                 return;
+            }
+
 
             switch (message->type)
             {
-            case SKSE::MessagingInterface::kDataLoaded:
 
-                Logger::GetSingleton().Initialize();
+            case SKSE::MessagingInterface::kDataLoaded:
+            {
+                //SKSE::AllocTrampoline(512);
+
                 
+
                 Logger::GetSingleton().Print(
-                    "SKSEPluginLoad called"
+                    "SKSEPluginLoad called :)"
                 );
 
+
                 RegisterInputSink();
+                ProcessInputQueueHook::Install();
 
                 EffectDatabase::BuildEditorIDCache();
-
                 EffectDatabase::Scan();
-                
-                ProcessInputQueueHook::Install();
+
                 LoadConfig();
 
-                //VerifySurvivalMode();
-                
+                break;
+            }
+
+
             case SKSE::MessagingInterface::kPreLoadGame:
-            
-                //EffectControl::ResetRuntimeState();
-            
+            {
+                /*
+                 * Se futuramente precisarmos resetar estado
+                 * runtime antes de carregar save.
+                 */
+
+                break;
+            }
+
 
             case SKSE::MessagingInterface::kPostLoadGame:
             {
                 Logger::GetSingleton().Print(
-                    "Effect Debugger: SAVE LOADED"
-                );
-
-                static bool hooksInitialized = false;
-
-                if (!hooksInitialized)
-                {
-                    if (!InitializeMinHook())
-                    {
-                        Logger::GetSingleton().Print(
-                            "Effect Debugger: MinHook initialization FAILED"
-                        );
-
-                        hooksInitialized = true;
-                        break;
-                    }
-
-                    if (!InitializePresentHook())
-                    {
-                        Logger::GetSingleton().Print(
-                            "Effect Debugger: Present hook initialization FAILED"
-                        );
-
-                        // Não deixa uma falha do Present Hook derrubar o Skyrim.
-                        hooksInitialized = true;
-
-                        break;
-                    }
-
-                    hooksInitialized = true;
-
-                    Logger::GetSingleton().Print(
-                        "Effect Debugger: READY - PRESS G"
-                    );
-                }
-
-                break;
-            }
-
-            case SKSE::MessagingInterface::kPostLoad:
-
-                g_postLoadGame = true;
-
-                Logger::GetSingleton().Print(
-                    "POST LOAD GAME TRUE"
+                    "Effect Debugger: PostLoadGame"
                 );
 
                 break;
             }
+
+
             
+            }
         }
     );
+
+    //============================================================
+    // INICIA LOGGER
+    // ===========================================================
+
+    Logger::Initialize();
+
+
+    /*
+     * ============================================================
+     * INSTALA O HOOK DO RENDERER
+     * ============================================================
+     *
+     * NÃO espera PostLoadGame.
+     */
+
+    if (!RenderHooks::Install())
+    {
+        Logger::GetSingleton().Print(
+            "Effect Debugger: RenderHooks::Install FAILED."
+        );
+
+        return false;
+    }
+
+
+    Logger::GetSingleton().Print(
+        "Effect Debugger: RENDER HOOK READY."
+    );
+
 
     return true;
 }

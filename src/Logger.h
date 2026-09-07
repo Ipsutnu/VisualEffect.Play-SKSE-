@@ -1,15 +1,3 @@
-/*
- * Copyright (c) 2026 Preguissoso
- *
- * This file is part of VisualEffect.Play(SKSE).
- *
- * The source code is available for viewing and reference purposes only.
- * Modification, redistribution, forking, and creation of derivative
- * works are not permitted without prior written permission.
- *
- * See LICENSE for the full license terms.
- */
-
 #pragma once
 
 #include "pch.h"
@@ -32,44 +20,26 @@ namespace ModIntegrations
 class Logger
 {
 public:
-    static Logger& GetSingleton();
+    static void Initialize();
 
-    void Initialize();
+    // Mantido por compatibilidade com as chamadas do seu código atual
+    // ex: Logger::GetSingleton().Print("mensagem {}", arg1);
+    static Logger& GetSingleton()
+    {
+        static Logger instance;
+        return instance;
+    }
 
     template <typename... Args>
-    void Print(const std::string& fmt, Args&&... args)
+    void Print(fmt::format_string<Args...> a_fmt, Args&&... a_args)
     {
-        std::lock_guard<std::mutex> lock(_mutex);
-
-        if (!_initialized || !_file.is_open()) {
-            return;
-        }
-
-        try {
-            std::vformat_to(
-                std::ostreambuf_iterator<char>(_file),
-                fmt,
-                std::make_format_args(args...)
-            );
-
-            _file << '\n';
-            _file.flush();
-        }
-        catch (const std::exception& e) {
-            _file << "[LOGGER ERROR] " << e.what() << '\n';
-            _file.flush();
-        }
+        spdlog::info(a_fmt, std::forward<Args>(a_args)...);
     }
 
 private:
     Logger() = default;
-
-    ~Logger();
+    ~Logger() = default;
 
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
-
-    std::ofstream _file;
-    std::mutex _mutex;
-    bool _initialized = false;
 };
