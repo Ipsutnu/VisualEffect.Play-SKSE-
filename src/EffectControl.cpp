@@ -1,6 +1,6 @@
 #include "PCH.h"
 #include "EffectControl.h"
-
+//reseta o estado do efeito
 namespace EffectControl
 {
     void ResetRuntimeState()
