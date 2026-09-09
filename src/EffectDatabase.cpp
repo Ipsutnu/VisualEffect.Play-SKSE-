@@ -225,7 +225,7 @@ namespace EffectDatabase
 
     
 
-    // Verifica se o jogador possui o status de Ghost
+    // Invulneravel... nao utilizado, ainda.
     void SetPlayerInvulnerable(bool a_enable)
     {
         auto player = RE::PlayerCharacter::GetSingleton();
@@ -268,7 +268,7 @@ namespace EffectDatabase
 
         EffectControl::g_isPlayerInvulnerable = a_enable;
     }
-
+    //toggle para o emsmo...
     void TogglePlayerInvulnerable()
     {
         SetPlayerInvulnerable(!EffectControl::g_isPlayerInvulnerable);
@@ -434,8 +434,7 @@ namespace EffectDatabase
 
         if (EffectControl::copyUseEditorID)
         {
-            // Usa seu GetFormName(), que já possui
-            // a lógica de procurar o nome/Editor ID
+            //procurar o nome/Editor ID
             text = GetEditorIDFromForm(effect->form);
 
             if (text.empty())
