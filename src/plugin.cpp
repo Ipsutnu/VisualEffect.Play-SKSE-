@@ -73,6 +73,10 @@ public:
 
         // Converte a g_toggleKey (Virtual Key) para DX ScanCode para bater com o IDCode do Skyrim
         const UINT targetScanCode = MapVirtualKeyA(g_toggleKey, MAPVK_VK_TO_VSC);
+        const UINT movementToggleScanCode =
+            MapVirtualKeyW(
+                static_cast<UINT>(g_movementToggleKey),
+                MAPVK_VK_TO_VSC_EX) & 0xFFu;
         const bool isFunctionKey = (g_toggleKey >= VK_F1 && g_toggleKey <= VK_F24);
 
         // ================================================================
@@ -139,6 +143,24 @@ public:
                     buttonEvent->SetIDCode(0xFF);
                     break;
                 }
+
+                // The configured key is stored as a Windows virtual key,
+                // while Skyrim input events use DirectInput scan codes.
+                // Handle this before the menu-open early return so the lock
+                // works while the VisualEffect window is closed as well.
+                if (g_showTestWindow &&
+                    buttonEvent->GetDevice() == RE::INPUT_DEVICE::kKeyboard &&
+                    buttonEvent->GetIDCode() == movementToggleScanCode &&
+                    buttonEvent->GetRuntimeData().heldDownSecs <= 0.0f)
+                {
+                    EffectDatabase::TogglePlayerMovement();
+
+                    buttonEvent->GetRuntimeData().value = 0.0f;
+                    buttonEvent->GetRuntimeData().heldDownSecs = 0.0f;
+                    buttonEvent->SetUserEvent("");
+                    buttonEvent->SetIDCode(0xFF);
+                    break;
+                }
             }
         }
 
@@ -146,7 +168,7 @@ public:
         // 2. RESTRIÇÕES / TRAVAS APÓS O MENU ESTAR ABERTO
         // ================================================================
 
-        // Se o menu estiver fechado, interrompe e não processa os bloqueios abaixo
+        // The movement lock is active only while the editor window is open.
         if (!g_showTestWindow)
             return RE::BSEventNotifyControl::kContinue;
 
@@ -272,33 +294,6 @@ public:
             }
 
             // ============================================================
-            // 2D. MOVEMENT TOGGLE
-            // ============================================================
-
-            static bool movementKeyWasDown = false;
-
-            if (buttonEvent->GetDevice() == RE::INPUT_DEVICE::kKeyboard)
-            {
-                const auto key = buttonEvent->GetIDCode();
-
-                if (key == g_movementToggleKey)
-                {
-                    const auto value = buttonEvent->GetRuntimeData().value;
-
-                    if (value != 0.0f)
-                    {
-                        EffectDatabase::TogglePlayerMovement();
-
-                        // Consome somente o evento do toggle
-                        buttonEvent->GetRuntimeData().value = 0.0f;
-                        buttonEvent->GetRuntimeData().heldDownSecs = 0.0f;
-                        buttonEvent->SetUserEvent("");
-                        buttonEvent->SetIDCode(0xFF);
-                    }
-                }
-            }
-
-            // ============================================================
             // 3. BLOQUEIO DE MOVIMENTO
             // ============================================================
 
@@ -373,7 +368,20 @@ void RegisterInputSink()
     // Registra o nosso sink
     deviceManager->AddEventSink(InputHandler::GetSingleton());
 
-  
+    // The fallback mouse-delta suppression must run before PlayerControls.
+    // ControlMap blocks looking at the engine level; this keeps raw mouse
+    // input from reaching the camera during the same input frame.
+    auto& sinks = deviceManager->sinks;
+    for (RE::BSTArray<RE::BSTEventSink<RE::InputEvent*>*>::size_type i = 0;
+        i < sinks.size();
+        ++i)
+    {
+        if (sinks[i] == InputHandler::GetSingleton())
+        {
+            std::swap(sinks[i], sinks[0]);
+            break;
+        }
+    }
 }
 
 std::filesystem::path GetThemeDirectory()

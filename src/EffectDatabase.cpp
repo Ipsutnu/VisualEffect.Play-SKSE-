@@ -794,16 +794,8 @@ namespace EffectDatabase
         }
     }
 
-    bool g_canApplyMovementLock = false;
-
     void ApplyPlayerMovementState()
     {
-
-        if (!g_canApplyMovementLock)
-        {
-            return;
-        }
-
         auto* player = RE::PlayerCharacter::GetSingleton();
 
         // 1. Verifica se o jogador existe e se o 3D está carregado
@@ -816,16 +808,22 @@ namespace EffectDatabase
         if (!controlMap)
             return;
 
-        // ToggleControls aceita a flag de movimento e se ela deve estar ativa.
-        // Se g_disablePlayerMovement for TRUE, passamos FALSE para desligar os controles.
+        // Movement and camera looking are separate Skyrim control groups.
+        // Keep both in the same state so the lock cannot leave the camera free.
         controlMap->ToggleControls(
             RE::ControlMap::UEFlag::kMovement,
             !EffectControl::g_disablePlayerMovement,
             true
         );
 
+        controlMap->ToggleControls(
+            RE::ControlMap::UEFlag::kLooking,
+            !EffectControl::g_disablePlayerMovement,
+            true
+        );
+
         Logger::GetSingleton().Print(
-            "Player movement applied: {}",
+            "Player movement and looking applied: {}",
             EffectControl::g_disablePlayerMovement ? "DISABLED" : "ENABLED"
         );
     }
@@ -835,9 +833,8 @@ namespace EffectDatabase
     {
         EffectControl::g_disablePlayerMovement = !EffectControl::g_disablePlayerMovement;
 
-        
-
-        //ApplyPlayerMovementState();
+        if (g_showTestWindow)
+            ApplyPlayerMovementState();
     }
 
     //void SetPlayerActivateEnabled(bool a_enable)
@@ -898,7 +895,7 @@ namespace EffectDatabase
             //}
         //}
 
-        //g_canApplyMovementLock = true;
+        ApplyPlayerMovementState();
 
         //auto* controlMap = RE::ControlMap::GetSingleton();
         //if (!controlMap) return;
@@ -917,13 +914,21 @@ namespace EffectDatabase
 
     void OnCloseImGui()
     {
-        //auto* controlMap = RE::ControlMap::GetSingleton();
-        //if (!controlMap) return;
-
-        // Garante que o movimento sempre volte ao fechar o menu,
-        // sem alterar o valor de EffectControl::g_disablePlayerMovement
-        //controlMap->ToggleControls(RE::ControlMap::UEFlag::kMovement, true);
-        //EffectControl::g_movementLockActive = false;
+        // The selected state is retained, but its effect is modal: closing
+        // the editor always restores movement and camera looking.
+        if (auto* controlMap = RE::ControlMap::GetSingleton())
+        {
+            controlMap->ToggleControls(
+                RE::ControlMap::UEFlag::kMovement,
+                true,
+                true
+            );
+            controlMap->ToggleControls(
+                RE::ControlMap::UEFlag::kLooking,
+                true,
+                true
+            );
+        }
 
         EffectControl::g_disablePlayerActivate = false;
     }
